@@ -59,12 +59,15 @@ def scheduler_to(sched, device):
                 param._grad.data = param._grad.data.to(device)
 
 
-def save_file(folder, status, flmode, modename, dataset, dist, num_nodes, num_clusters, num_epochs, num_rounds, prop, agg_prop, starttime):
-    file_name = status + '_' +str(modename).upper() + '_' + dataset.upper() + '_' + dist.upper()  + '_' +'n'+ str(num_nodes)  + '_' + 'c' + str(num_clusters) + '_' +'e' + str(num_epochs) + '_' + 'r' + str(num_rounds) + '_' + 'prop' + str(prop) + '_' + 'aggprop' + str(agg_prop) +'_' +  starttime
+def save_file(file_list, folder, status, flmode, modename, dataset, skew,  alpha, num_nodes, num_clusters, num_epochs, num_rounds, prop, agg_prop, starttime, regagg, gossagg):
+    file_name = f'status_{str(modename).upper()}_{dataset.upper()}_a{str(alpha)}s{str(skew)}_n{str(num_nodes)}_c{str(num_clusters)}_e{str(num_epochs)}_r{str(num_rounds)}_prp{str(prop)}_ap{str(agg_prop)}_rg{str(regagg)}{str(gossagg)}_{starttime}'
+    if file_list is not None:
+        file_list.append(file_name)
     file_name = os.path.join(folder, file_name)
     saved_set = {}
     if modename != 'sgd':
-        saved_set = {'avgtrgloss' : flmode.avgtrgloss,
+        saved_set = { 'mode':modename,
+                      'avgtrgloss' : flmode.avgtrgloss,
                       'avgtrgacc' : flmode.avgtrgacc,
                       'avgtestloss' : flmode.avgtestloss,
                       'avgtestacc' : flmode.avgtestacc,
@@ -91,14 +94,28 @@ def save_file(folder, status, flmode, modename, dataset, dist, num_nodes, num_cl
                     
     with open(file_name, 'wb') as ffinal:
         pickle.dump(saved_set, ffinal)
-        
-    if status == 'Final':
-        inter_file = 'inter' + '_' + str(modename).upper() + '_' + dataset.upper() + '_' + dist.upper()  + '_' +'n'+ str(num_nodes)  + '_' + 'c' + str(num_clusters) + '_' +'e' + str(num_epochs) + '_' + 'r' + str(num_rounds) + '_' + starttime
-        if inter_file in os.listdir():
-            try:
-                os.remove(inter_file)
-                print('Removed Intermediate Results')
-            except:
-                print('Cannot Locate the intermediate results file')
-        else:
-            print('Cannot locate file')
+
+
+def merge_files(target_folder, file_list, inter_files_list):
+    saved_state = {}
+    mode_list = []
+    for file in file_list:
+        with open(os.path.join(target_folder, file),  'rb') as f:
+            state = pickle.load(f)
+        mode_list.append(state['mode'])
+        saved_state[state['mode']] = {x:state[x] for x in state.keys() if x != 'mode'}
+    saved_state['mode_list'] = mode_list
+
+    file_name = '_'.join(file.split('_')[2:])
+    
+    with open (os.path.join(target_folder, file_name), 'wb') as final_saved:
+        pickle.dump(saved_state, final_saved)
+    print('All files Merged')
+
+    for file in file_list:
+        os.remove(os.path.join(target_folder, file))
+    print('All unmerged final files removed')
+
+    for inter_file in inter_files_list:
+        os.remove(inter_file)
+    print('All inter_files removed')

@@ -114,7 +114,7 @@ def node_update(client_model, optimizer, train_loader, record_loss, record_acc, 
 #     del epoch_loss, epoch_acc
 #     gc.collect()
     
-def aggregate(model_list, node_list:list, scale:dict, noise = True):
+def aggregate(model_list, node_list:list, scale:dict, noise = False):
     agg_model = copy.deepcopy(model_list[0].model)
     
     # Zeroing container model so that scaling weights may be assigned to each participating model
@@ -138,7 +138,7 @@ def aggregate(model_list, node_list:list, scale:dict, noise = True):
         
     return agg_model
 
-def selctive_aggregate(model_list, agg_full:list, scale:dict, agg_conv = None, noise = False):
+def selective_aggregate(model_list, agg_full:list, scale:dict, agg_conv = None, noise = False):
     agg_model = copy.deepcopy(model_list[0].model)
     # Zeroing container model so that scaling weights may be assigned to each participating model
     for layer in agg_model.state_dict().keys():
@@ -160,6 +160,39 @@ def selctive_aggregate(model_list, agg_full:list, scale:dict, agg_conv = None, n
                     agg_model.state_dict()[layer].add_(torch.mul(model_list[node].model.state_dict()[layer], scale[node]))
             agg_model.state_dict()[layer].div_(len(agg_conv))
                 
+    return agg_model
+
+
+def layerwise_aggregate(model_list, self_idx, nodelist, scale, thresh, ref_globmodel, noise = False):
+    cos = nn.CosineSimilarity(dim=0, eps=1e-6)
+    if ref_globmodel != None: # Send global model to cuda
+        ref_globmodel.to('cuda')
+    agg_model = copy.deepcopy(model_list[0].model)
+    # Zeroing container model so that scaling weights may be assigned to each participating model
+    for layer in agg_model.state_dict().keys():
+        agg_model.state_dict()[layer].mul_(0.00)
+        
+    if noise == True: # Create copies so that original models are not corrupted. Only received ones become noisy
+        model_list = {node:Net.add_noise(copy.deepcopy(model_list[node].model)) for node in nodelist}
+    
+    for layer in agg_model.state_dict().keys():
+        if 'weight' in layer:
+            if ref_globmodel != None: 
+                ref = ref_globmodel.state_dict()[layer].view(-1).detach()
+            else:
+                ref = model_list[self_idx].model.state_dict()[layer].view(-1).detach()
+            i = 0
+            for node in nodelist:
+                if node != self_idx:
+                    tgt = model_list[node].model.state_dict()[layer].view(-1).detach()
+                    cos_val = cos(ref, tgt).item()
+#                   print(layer, cos_val, flush = True, end = ',')
+                    if cos_val > thresh:
+                        agg_model.state_dict()[layer].add_(torch.mul(model_list[node].model.state_dict()[layer], scale[node]))
+                        i += 1
+            agg_model.state_dict()[layer].div_(i)
+    if ref_globmodel != None:
+        ref_globmodel.to('cpu')        
     return agg_model
 
 def model_checker(model1, model2):
@@ -200,6 +233,19 @@ def extract_weights(model, add_noise = True):
             continue
         weights[key] = model.state_dict()[key]
     return weights
+
+def vectorize_model(model, key = 'all'):
+    temp = []
+    for layer in model.state_dict():
+        if key != 'all': # Vectorize parts of model
+            if 'weight' in layer and key in layer:
+                temp.append(model.state_dict()[layer].view(-1).detach())
+        else: # Vectorize complete model
+            if 'weight' in layer: 
+                temp.append(model.state_dict()[layer].view(-1).detach())
+    x = torch.cat(temp)
+    return x
+
 
 def calculate_divergence(modes, main_model_dict, cluster_set, num_nodes, divergence_results):
     centr_fed_ref = np.random.randint(0, num_nodes)
@@ -286,5 +332,3 @@ def revise_neighborhood(div_dict, n, sort_type = 'min'):
         temp_nodes = [max_node[0] for max_node in temp]
         revised_neighborhood.append(temp_nodes)
     return revised_neighborhood
-    
-                     

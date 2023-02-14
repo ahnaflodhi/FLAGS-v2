@@ -46,7 +46,12 @@ class Nodes:
         self.testloss = []
         self.testacc = []
         self.average_epochloss = 0
-        
+        self.cos_vals = {nhbr:None for nhbr in self.neighborhood}
+        self.cosvals_selfmodel = {nhbr:None for nhbr in self.neighborhood}
+        self.cosvals_globmodel = {nhbr:None for nhbr in self.neighborhood}
+        # self.cosvals_selflay = {nhbr:None for nhbr in self.neighborhood}
+        # self.cosvals_globlay = {nhbr:None for nhbr in self.neighborhood}
+
         # Appending self-idx to record CFL divergence
         # Divergence Targets
         div_targets = self.neighborhood
@@ -62,6 +67,22 @@ class Nodes:
         self.opt = optim.SGD(self.model.parameters(), lr = self.lr) # , momentum = 0.9
 #         lambda_sch = lambda epoch: 1 * epoch
 #         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.opt, lr_lambda= lambda_sch)
+
+    def cos_check(self, nodeset, refglobal_model):
+        global_model = copy.deepcopy(nodeset[0].model)
+        global_model.load_state_dict(refglobal_model)
+        global_model.to('cuda')
+        cos = nn.CosineSimilarity(dim=0, eps=1e-6)
+        # Vectorizing Full Model
+        selfref_fullvec = vectorize_model(self.model, key = 'all')
+        globref_fullvec = vectorize_model(global_model, key = 'all')
+
+        for nhbr in self.neighborhood:
+            tgt_fullvec = vectorize_model(nodeset[nhbr].model)
+            self.cosvals_selfmodel[nhbr] = cos(selfref_fullvec, tgt_fullvec).item()
+            self.cosvals_globmodel[nhbr] = cos(globref_fullvec, tgt_fullvec).item()
+
+        global_model.to('cpu')
  
     def local_update(self, num_epochs):
         # client_model, optimizer, scheduler, train_loader, record_loss, record_acc, epochs_done, num_epochs
@@ -78,19 +99,20 @@ class Nodes:
         self.testloss.append(test_loss)
         self.testacc.append(test_acc)
         print(f'Node{self.idx}: LR={self.opt.param_groups[0]["lr"]} Trg Loss= {self.trgloss[-1]:0.3f} Trg Acc= {self.trgacc[-1]} Test Acc= {self.testacc[-1]:0.3f}', end = ", ", flush = True)
-         
+
+
     def scale_update(self, weightage):
         scale = {node:1.0 for node in self.neighborhood}
         return scale
             
     def aggregate_nodes(self, nodeset, agg_prop, scale:dict, cluster_set = None):
-        # Choosing the #agg_count number of highest ranked nodes for aggregation
+        # Choosing the #agg_count number of highest ranked nodes for aggregation)
         # If Node aggregating Nhood
         if cluster_set == None:
             agg_scope = int(np.floor(agg_prop * len(self.ranked_nhood)))
             if agg_scope >= 1 and agg_scope <= len(self.ranked_nhood):
                 try:
-                    agg_targets = self.ranked_nhood[:agg_scope]
+                    agg_targets = random.sample(self.ranked_nhood, agg_scope) #self.ranked_nhood[:agg_scope]
                     agg_targets.append(self.idx)
                 except:
                     print(f'Agg_scope:{agg_scope} does not conform to neighborhood {len(self.ranked_nhood)}')        
@@ -108,7 +130,7 @@ class Nodes:
         agg_model = aggregate(nodeset, agg_targets, scale)
         
         self.model.load_state_dict(agg_model.state_dict())
-        del agg_model
+        del agg_modelsave
         gc.collect()
         
     def aggregate_random(self, nodeset, scale):
@@ -121,27 +143,52 @@ class Nodes:
         self.model.load_state_dict(agg_model.state_dict())
         del agg_model
         gc.collect()
-        
-    def cos_check(self, nodeset):
+
+    def aggregate_selective(self, nodeset, scale, cos_lim, ref_rnd):
+        # agg_full = []
+        # agg_conv = []
+        # for nhbr in self.neighborhood:
+        #     if ref_rnd != None:
+        #         if self.cosvals_globmodel[nhbr] >= cos_lim:
+        #             agg_full.append(nhbr)
+        #         elif 0.0 <= self.cosvals_globmodel[nhbr] < cos_lim:
+        #             agg_conv.appen(nhbr)
+        #     else:
+        #         if self.cosvals_selfmodel[nhbr] >= cos_lim:
+        #             agg_full.append(nhbr)
+        #         elif 0.0 <= self.cosvals_selfmodel[nhbr] < cos_lim:
+        #             agg_conv.append(nhbr)
+                
+        # agg_full.append(self.idx)
+        # agg_model = selective_aggregate(nodeset, agg_full, scale, agg_conv = agg_conv)
+        # self.model.load_state_dict(agg_model.state_dict())
+        # del agg_model
+        # gc.collect()
+
+        ### V-2
         cos = nn.CosineSimilarity(dim=0, eps=1e-6)
-        self.cos_vals = {nhbr:None for nhbr in self.neighborhood}
         self_vec = vectorize_model(self.model, 'all')
         for neighbor in self.neighborhood:
-            temp =vectorize_model(nodeset[neighbor].model, 'all')
-            cos_sim = cos(self_vec, temp)
-            self.cos_vals[neighbor] = cos_sim
-    
-    def aggregate_selective(self, nodeset):
+            temp = vectorize_model(nodeset[neighbor].model, key = 'all')
+            self.cos_vals[neighbor] = cos(self_vec, temp).item()
         agg_full = []
         agg_conv = []
         for nhbr in self.neighborhood:
-            if self.cos_vals[nhbr] > 0.5:
+            if self.cos_vals[nhbr] > cos_lim:
                 agg_full.append(nhbr)
-            elif 0.0 <= self.cos_vals[nhr] <= 0.5:
+            elif 0.0 <= self.cos_vals[nhbr] <= cos_lim:
                 agg_conv.appen(nhbr)
-                
+#         print(f' Cos Sims {self.cos_vals}', flush = True, end = ',')
         agg_full.append(self.idx)
-        agg_model = selective_aggregate(nodeset, agg_full, agg_conv, scale)
+        
+        agg_model = selective_aggregate(nodeset, agg_full, scale, agg_conv = agg_conv)
+        self.model.load_state_dict(agg_model.state_dict())
+        del agg_model
+        gc.collect()
+
+
+    def aggregate_layerwise(self, nodeset, scale, cos_thresh, ref_globmodel = None):
+        agg_model = layerwise_aggregate(nodeset, self.idx, self.neighborhood, scale, cos_thresh, ref_globmodel)
         self.model.load_state_dict(agg_model.state_dict())
         del agg_model
         gc.collect()
@@ -176,15 +223,3 @@ class Servers:
         self.model.load_state_dict(server_agg_model.state_dict())
         del server_agg_model
         gc.collect()
-        
-def vectorize_model(model, key = 'all'):
-    temp = []
-    for layer in model.state_dict():
-        if key != 'all': # Vectorize parts of model
-            if 'weight' in layer and key in layer:
-                temp.append(model.state_dict()[layer].view(-1))
-        else: # Vectorize complete model
-            if 'weight' in layer: 
-                temp.append(model.state_dict()[layer].view(-1))
-    x = torch.cat(temp)
-    return x

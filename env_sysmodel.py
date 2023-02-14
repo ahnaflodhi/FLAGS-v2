@@ -106,21 +106,21 @@ class system_model:
 class FL_Modes(Nodes):
     modes_list = []
     #'d2d', dataset, num_epochs, num_nodes, base_model, num_labels, in_ch, traindata, train_dist, testdata, test_dist, dataset, batch_size, env.neighborhood_map, env.Lp
-    def __init__(self, name, dataset, num_epochs, num_rounds, num_nodes, dist, base_model, 
+    def __init__(self, name, dataset, num_epochs, num_rounds, num_nodes, base_model, 
                  num_labels, in_channels, traindata, traindata_dist, testdata, testdata_dist, 
                  batch_size, nhood, env_Lp, num_clusters, **kwargs):
-        # Kwargs include d2d_agg_flg, ch_agg_flg, hserver_agg_flg, 
+        # Kwargs include Flags i.e. Device_Op, Selective_D2D, CH_Op, Selective_CH, HSer_Op, Selective_HSer 
         
         super().__init__(1, base_model, num_labels, in_channels, traindata, traindata_dist, 
                          testdata, testdata_dist, dataset, batch_size, [0,0])
         self.name = name
         self.dataset = dataset
-        self.dist = dist
         self.epochs = num_epochs
         self.rounds = num_rounds
         self.base_model = copy.deepcopy(base_model)
         self.batch_size = batch_size
         self.cfl_model = copy.deepcopy(self.base_model)
+        self.cfl_model_dict = {}
             
         if self.name != 'sgd':
             self.num_clusters = num_clusters
@@ -128,11 +128,13 @@ class FL_Modes(Nodes):
             self.nodeweights(traindata, traindata_dist, scale = 'one')
             self.form_nodeset(num_labels, in_channels, traindata, traindata_dist, testdata, testdata_dist, nhood)
             
-            # Aggregation Flags
-            self.d2d_agg_flg = kwargs['d2d_agg_flg']
-            self.ch_agg_flg = kwargs['ch_agg_flg']
-            self.hserver_agg_flg = kwargs['hserver_agg_flg']
-            self.inter_ch_agg_flg = kwargs['inter_ch_agg_flg']
+            # Aggregation Flags - 'Device_Op' :'D2D', 'Selective_D2D':'default', 'CH_Op': False, 'Selective_CH': False, 'HSer_Op':False, 'Selective_HSer':False
+            self.D2D_Op = kwargs['Device_Op']
+            self.Selective_D2D = kwargs['Selective_D2D']
+            self.CH_Op = kwargs['CH_Op']
+            self.Selective_CH = kwargs['Selective_CH']
+            self.HSer_Op = kwargs['HSer_Op']
+            self.Selective_Hser = kwargs['Selective_HSer']
                         
             self.cluster_trgloss = {cluster_id:[] for cluster_id in range(num_clusters)}
             self.cluster_trgacc = {cluster_id:[] for cluster_id in range(num_clusters)}
@@ -178,13 +180,14 @@ class FL_Modes(Nodes):
         elif scale == 'one':
             self.weights = {i:1.0 for i in range(self.num_nodes)}                
          
-    def update_round(self):
+    def update_round(self, emin, emax):
         """
         Perform local training on the entire worker set of cuda_models.
+        Takes min_epochs and max_epochs and radomly selects for each node, the number of the epochs between the two.
         """
         temp_loss = []
         for i, node in enumerate(self.nodeset):
-            epochs = np.random.randint(1, 4) # Different local updates. Set to a number if homogenous training needed
+            epochs = np.random.randint(emin, emax) # Different local updates. Set to a number if homogenous training needed
             node.model.to('cuda')
             node.local_update(epochs) # Asynchronous Aggregation. Change epochs to self.epochs for synchronous operation.
             
@@ -208,6 +211,11 @@ class FL_Modes(Nodes):
         # Calculate glolbal and cluter averages
         self.global_avgs()
         self.cluster_avgs(cluster_set)
+
+    # Perform Sim Check based on Cosine-Similarity
+    def sim_check(self, ref_rnd):
+        for node in self.nodeset:
+            node.cos_check(self.nodeset, self.cfl_model_dict[ref_rnd])
         
     def ranking_round(self, rnd, mode):
         for node in self.nodeset:
@@ -223,9 +231,29 @@ class FL_Modes(Nodes):
             elif sort_crit == 'fc':
                 self.apply_ranking(node, self.div_fc_dict[node], rnd, sort_scope, sort_type)
                 
-    def nhood_aggregate_round(self, agg_prop):
+    def nhood_aggregate_round(self, agg_prop, selective_flag = 'default'):
         for node in self.nodeset:
             node.aggregate_nodes(self.nodeset, agg_prop, self.weights)
+
+    def selective_aggregate_round(self, cos_lim, ref_rnd = None):
+        # Based on Model Similarity
+        for node in self.nodeset:
+            node.aggregate_selective(self.nodeset, self.weights, cos_lim, ref_rnd)
+
+    def layerwise_aggregate_round(self, cos_lim, ref_rnd = None):
+        # Based on layerwise similarity
+        for node in self.nodeset:
+            if ref_rnd != None:
+                node.aggregate_layerwise(self.nodeset, self.weights, cos_lim, self.cfl_model_dict[ref_rnd])
+            else:
+                node.aggregate_layerwise(self.nodeset, self.weights, cos_lim)
+   
+    def stale_aggregate_round(self, ref_rnd, cos_lim):
+        # Based on Similarity w.r.t a Stale Global Model
+        for node in self.nodeset:
+            #    def stale_aggregate_layerwise(self, nodeset, staleglobal, scale):
+            node.stale_aggregate_layerwise(self.nodeset, self.cfl_model_dict[ref_rnd], self.weights, cos_lim)
+
             
     def random_aggregate_round(self):
         node_pairs = []
@@ -234,39 +262,46 @@ class FL_Modes(Nodes):
             temp =  random.sample(node_list, 2)
             node_list = [item for item in node_list if item not in temp]
             node_pairs.append(temp)
+            
         for node_pair in node_pairs:
-            aggregate(self.nodeset, node_pair, self.weights)
+            agg_model = aggregate(self.nodeset, node_pair, self.weights)
+            for node in node_pair:
+                self.nodeset[node].model.load_state_dict(agg_model.state_dict())
+                
+        del agg_model
+        gc.collect()
+    
             
     def clshead_aggregate_round(self, cluster_head, cluster_set, agg_prop):
         self.nodeset[cluster_head].aggregate_nodes(self.nodeset, agg_prop, self.weights, cluster_set = cluster_set)
         # Load CH model on all cluster nodes
         for node in cluster_set:
-            self.nodeset[node].model = copy.deepcopy(self.nodeset[cluster_head].model)
-#             self.nodeset[node].model.load_state_dict(self.nodeset[cluster_head].model.state_dict())
+            self.nodeset[node].model.load_state_dict(self.nodeset[cluster_head].model.state_dict())
     
-    def inter_ch_aggregate_round(self, cluster_heads_list):
+    def inter_ch_aggregate_round(self, cluster_heads_list, rounds):
         random.shuffle(cluster_heads_list)
         cluster_heads = copy.deepcopy(cluster_heads_list) # The new list will be changed, hence a copy of the original
-        ch_pairs = []
-        if len(cluster_heads) % 2 != 0:
-            while len(cluster_heads) > 1:
-                temp = random.sample(cluster_heads, 2)
-                cluster_heads = [ch for ch in cluster_heads if ch not in temp]
-                ch_pairs.append(temp)
-        else:
-            while len(cluster_heads) != 0:
-                temp = random.sample(cluster_heads, 2)
-                cluster_heads = [ch for ch in cluster_heads if ch not in temp]
-                ch_pairs.append(temp)
-                
-        for ch_pair in ch_pairs:
-            agg_model = aggregate(self.nodeset, ch_pair, self.weights)
-            for node in ch_pair:
-                self.nodeset[node].model.load_state_dict(agg_model.state_dict()) 
+        for _ in range(rounds):
+            ch_pairs = []
+            if len(cluster_heads) % 2 != 0:
+                while len(cluster_heads) > 1:
+                    temp = random.sample(cluster_heads, 2)
+                    cluster_heads = [ch for ch in cluster_heads if ch not in temp]
+                    ch_pairs.append(temp)
+            else:
+                while len(cluster_heads) != 0:
+                    temp = random.sample(cluster_heads, 2)
+                    cluster_heads = [ch for ch in cluster_heads if ch not in temp]
+                    ch_pairs.append(temp)
+
+            for ch_pair in ch_pairs:
+                agg_model = aggregate(self.nodeset, ch_pair, self.weights)
+                for node in ch_pair:
+                    self.nodeset[node].model.load_state_dict(agg_model.state_dict()) 
         del agg_model
         gc.collect()
     
-    def cfl_aggregate_round(self, prop, flag):
+    def cfl_aggregate_round(self, rnd, prop, flag):
         nodelist = list(range(self.num_nodes))
         agg_count = int(np.floor(prop * len(nodelist)))
         if agg_count < 1:
@@ -275,8 +310,9 @@ class FL_Modes(Nodes):
         sel_nodes = random.sample(nodelist, agg_count) # Random Sampling
         agg_model = aggregate(self.nodeset, sel_nodes, self.weights)
         self.cfl_model.load_state_dict(agg_model.state_dict())
+        self.cfl_model_dict[rnd] = self.cfl_model.state_dict()
 
-        if flag == 'CServer':
+        if flag == 'CSer':
             for node in self.nodeset:
                 node.model.load_state_dict(self.cfl_model.state_dict())
         
