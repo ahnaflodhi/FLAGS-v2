@@ -52,6 +52,7 @@ class system_model:
         
     def create_graph(self):
         self.graph = nx.random_partition_graph(self.cluster_sizes, self.prob_int, self.prob_ext)
+        plt.figure(figsize = (50,25))
         nx.draw(self.graph, with_labels = True, font_weight = 'bold')
         plt.title('Network graph')
         plt.savefig('Network_graph')

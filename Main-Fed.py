@@ -5,6 +5,9 @@ import os
 # os.environ["CUDA_VISIBLE_DEVICES"]="2"
 import sys, argparse
 import pickle
+import warnings
+warnings.filterwarnings("ignore")
+
 import time
 import gc
 from get_args import arg_parser
@@ -42,10 +45,14 @@ gossagg = args.gossagg
                 # 'hgossip':None,  'cfl': None, 'sgd' : None}
 # modes_list = {'d2d':None, 'd2dsel': None, 'd2dlay':None, 'd2dstalemodel': None}
 # modes_list = {'d2dstalemodel':None, 'd2dlay':None, 'd2dsel':None, 'd2dstalelay':None, 'd2d':None}
-modes_list = {'d2dsel':None}
+modes_list = {'d2d':None, 'hd2d':None, 'gossip':None, 'chd2d':None, 'hfl':None}
 
-def D2DFL(model_type, dataset, batch_size, test_batch_size, modes, num_nodes, num_clusters, num_servers, num_rounds, min_epochs, max_epochs, alpha, skew, 
+def FL_Sim(model_type, dataset, batch_size, test_batch_size, modes, num_nodes, num_clusters, num_servers, num_rounds, min_epochs, max_epochs, alpha, skew, 
             overlap, prop, agg_prop, stale_lim, cos_lim, regagg, gossagg):
+
+
+    print(args)
+    print(modes.keys())      
     
     files_list = [] # Record of all results saved. Used to merge into one file the end.
     inter_files_list = []
@@ -170,8 +177,6 @@ def D2DFL(model_type, dataset, batch_size, test_batch_size, modes, num_nodes, nu
                 # # Perform Testing on Locally trained/fine-tuned models
                 modes[mode].test_round(env.cluster_set)
 
-                # Share partials / layers
-
                 #4-Aggregate from neighborhood  using the weights obtained in the previous step
                 print(f'Starting Local Aggregation in round{rnd} for mode {mode}')
                 modes[mode].cfl_aggregate_round(rnd, prop, modes[mode].D2D_Op)
@@ -194,7 +199,7 @@ def D2DFL(model_type, dataset, batch_size, test_batch_size, modes, num_nodes, nu
                             modes[mode].selective_aggregate_round(cos_lim, ref_rnd = ref_rnd)
                         elif modes[mode].Selective_D2D == 'stalelay_global':
                             modes[mode].layerwise_aggregate_round(cos_lim, ref_rnd = ref_rnd)
-                    elif modes[mode].d2d_op == 'Random':
+                    elif modes[mode].D2D_Op == 'Random':
                         modes[mode].random_aggregate_round()
 
                 # 5- Cluster operations: 
@@ -273,8 +278,5 @@ def D2DFL(model_type, dataset, batch_size, test_batch_size, modes, num_nodes, nu
             
 ## Main Function
 if __name__ == "__main__":
-#     dataset, batch_size, test_batch_size, modes, num_nodes, num_clusters, num_rounds, num_epochs, shard_size, overlap, dist
-# def D2DFL(model_type, dataset, batch_size, test_batch_size, modes, num_nodes, num_clusters, num_servers, num_rounds, min_epochs, max_epochs, alpha, skew, 
-            # overlap, prop, agg_prop, stale_lim, cos_lim, regagg, gossagg):
-        mode_state = D2DFL(modeltype, dataset, batch_size, test_batch_size, modes_list,  nodes, clusters, servers, rounds, epochs_min, epochs_max, alpha, skew, 
+        mode_state = FL_Sim(modeltype, dataset, batch_size, test_batch_size, modes_list,  nodes, clusters, servers, rounds, epochs_min, epochs_max, alpha, skew, 
         overlap_factor, prop, agg_prop, stale, cos_lim, regagg, gossagg)

@@ -130,7 +130,7 @@ class Nodes:
         agg_model = aggregate(nodeset, agg_targets, scale)
         
         self.model.load_state_dict(agg_model.state_dict())
-        del agg_modelsave
+        del agg_model
         gc.collect()
         
     def aggregate_random(self, nodeset, scale):
